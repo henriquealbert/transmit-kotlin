@@ -20,7 +20,9 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: integration-server/package-lock.json
+          cache-dependency-path: |
+            integration-server/package-lock.json
+            Examples/Backend/package-lock.json
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -28,8 +30,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Install Android platform
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Install real Adonis integration server
-        run: npm ci --prefix integration-server --no-audit --no-fund
+      - name: Install real Adonis servers
+        run: |
+          npm ci --prefix integration-server --no-audit --no-fund
+          npm ci --prefix Examples/Backend --no-audit --no-fund
       - name: Build library, test, enforce coverage, and build example
         run: ./gradlew assembleRelease :core:test :core:integrationTest :core:koverVerify :core:koverXmlReport :example:assembleDebug
       - name: Verify publication

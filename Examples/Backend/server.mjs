@@ -24,26 +24,26 @@ await app.boot()
 const server = await app.container.make('server')
 const router = await app.container.make('router')
 const transmit = await app.container.make('transmit')
-const channel = 'demo/messages'
-const serverInstance = randomUUID().slice(0, 8)
+const channel = 'chats/general'
+const serverInstance = randomUUID()
 let sequence = 0
 server.use([() => import('@adonisjs/core/bodyparser_middleware')])
 transmit.registerRoutes()
 transmit.on('subscribe', ({ uid, channel }) => console.log(`SUBSCRIBED uid=${uid} channel=${channel} server=${serverInstance}`))
 
-function publish(text, source) {
-  const message = { id: randomUUID(), text, source, serverInstance, sequence: ++sequence, sentAt: new Date().toISOString() }
+function publish(text, sender) {
+  const message = { seq: `${serverInstance}:${++sequence}`, text, sender, sentAt: new Date().toISOString() }
   transmit.broadcast(channel, message)
-  console.log(`PUBLISHED server=${serverInstance} sequence=${sequence} source=${source} text=${text}`)
+  console.log(`PUBLISHED server=${serverInstance} sequence=${sequence} sender=${sender} text=${text}`)
   return message
 }
 router.get('/health', () => ({ ok: true, channel, serverInstance }))
-router.post('/broadcast', ({ request, response }) => {
+router.post('/messages', ({ request, response }) => {
   const text = request.input('text')
   if (typeof text !== 'string' || !text.trim() || text.length > 200) {
     return response.badRequest({ error: 'Provide a nonempty text string of at most 200 characters.' })
   }
-  return publish(text.trim(), 'manual')
+  return publish(text.trim(), 'guest')
 })
 
 await app.start(async () => {
@@ -60,8 +60,8 @@ await app.start(async () => {
     http.once('error', reject)
     http.listen(port, '127.0.0.1', resolve)
   })
-  console.log(`READY http://127.0.0.1:${port} channel=${channel} server=${serverInstance}`)
-  const timer = setInterval(() => publish('Hello from the Adonis timer', 'timer'), 5000)
+  console.log(`READY http://127.0.0.1:${http.address().port} channel=${channel} server=${serverInstance}`)
+  const timer = setInterval(() => publish('Hello from Adonis', 'server'), 5000)
   async function shutdown() {
     clearInterval(timer)
     for (const socket of sockets) socket.destroy()

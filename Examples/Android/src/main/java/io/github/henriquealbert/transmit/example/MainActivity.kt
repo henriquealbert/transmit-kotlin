@@ -14,6 +14,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.github.henriquealbert.transmit.TransmitClient
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -26,10 +29,13 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 
 @Serializable
-data class Message(val id: String, val text: String, val source: String, val serverInstance: String, val sequence: Int, val sentAt: String)
+data class Message(val seq: String, val text: String, val sender: String, val sentAt: String)
 
 class MainActivity : ComponentActivity() {
     private val baseUrl = "http://10.0.2.2:3333"
+    private val channel = "chats/general"
+    private var listening by mutableStateOf(false)
+    private val seen = mutableSetOf<String>()
     private val client = TransmitClient(baseUrl, lifecycleScope = lifecycleScope)
     private val http = OkHttpClient()
     private val messages = mutableStateListOf<Message>()
@@ -47,17 +53,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        lifecycleScope.launch {
-            val seen = mutableSetOf<String>()
-            try {
-                client.messages<Message>("demo/messages").collect {
-                    if (seen.add(it.id)) {
-                        messages.add(0, it)
-                        if (messages.size > 100) messages.removeAt(messages.lastIndex)
-                    }
-                }
-            } catch (e: Exception) { error = e.message }
-        }
+        subscribe()
         setContent {
             val state by client.state.collectAsState()
             val listState = rememberLazyListState()
@@ -66,17 +62,23 @@ class MainActivity : ComponentActivity() {
                 Surface(Modifier.fillMaxSize()) {
                     Column(Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("TRANSMIT / ANDROID", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
-                        Text("Live from Adonis", style = MaterialTheme.typography.headlineLarge)
+                        Text("General chat", style = MaterialTheme.typography.headlineLarge)
                         Text("${state.name}  •  ${messages.size} messages  •  $reconnects reconnects", color = MaterialTheme.colorScheme.primary)
-                        Text("One stream. Shared channels. Automatic recovery.", style = MaterialTheme.typography.bodyMedium)
-                        Button(onClick = { broadcast() }, modifier = Modifier.fillMaxWidth()) { Text("Send a message") }
+                        Text(channel, style = MaterialTheme.typography.bodyMedium)
+                        Button(onClick = { publish() }, enabled = listening, modifier = Modifier.fillMaxWidth()) { Text("Send a message") }
+                        OutlinedButton(onClick = {
+                            if (listening) {
+                                client.unsubscribe(channel)
+                                listening = false
+                            } else subscribe()
+                        }, modifier = Modifier.fillMaxWidth()) { Text(if (listening) "Unsubscribe" else "Subscribe") }
                         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         LazyColumn(state = listState, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            items(messages, key = { it.id }) { message ->
+                            items(messages, key = { it.seq }) { message ->
                                 Card(Modifier.fillMaxWidth()) {
                                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Text(message.text, style = MaterialTheme.typography.titleMedium)
-                                        Text("${message.source.uppercase()}  /  #${message.sequence}  /  ${message.serverInstance}", style = MaterialTheme.typography.labelSmall)
+                                        Text("${message.sender}  /  #${message.seq.substringAfterLast(':')}  /  ${message.seq.take(8)}", style = MaterialTheme.typography.labelSmall)
                                         Text(message.sentAt, style = MaterialTheme.typography.bodySmall)
                                     }
                                 }
@@ -88,15 +90,35 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun broadcast() { lifecycleScope.launch {
+    private fun subscribe() {
+        if (listening) return
+        listening = true
+        error = null
+        lifecycleScope.launch {
+            try {
+                client.messages<Message>(channel).collect {
+                    if (seen.add(it.seq)) {
+                        messages.add(0, it)
+                        if (messages.size > 100) messages.removeAt(messages.lastIndex)
+                    }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { error = e.message; listening = false }
+        }
+    }
+
+    private fun publish() { lifecycleScope.launch {
         try {
+            withTimeout(15_000) { client.awaitSubscribed(channel) }
             withContext(Dispatchers.IO) {
                 val body = buildJsonObject { put("text", "Hello from Android") }.toString()
-                http.newCall(Request.Builder().url("$baseUrl/broadcast").post(body.toRequestBody("application/json".toMediaType())).build()).execute().use {
-                    check(it.isSuccessful) { "Broadcast failed: ${it.code}" }
+                http.newCall(Request.Builder().url("$baseUrl/messages").post(body.toRequestBody("application/json".toMediaType())).build()).execute().use {
+                    check(it.isSuccessful) { "Publish failed: ${it.code}" }
                 }
             }
-        } catch (e: Exception) { error = e.message }
+        } catch (e: TimeoutCancellationException) { error = "Subscription confirmation timed out" }
+        catch (e: CancellationException) { throw e }
+        catch (e: Exception) { error = e.message }
     } }
 
     override fun onDestroy() {

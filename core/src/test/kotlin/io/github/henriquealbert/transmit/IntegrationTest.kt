@@ -35,9 +35,9 @@ class IntegrationTest {
             val transmit = TransmitClient(Requests(base, "token") { token }, OkHttpTransport(null), Dispatchers.IO) { delay(50) }
             client = transmit
             val received = mutableListOf<JsonElement>()
-            val collector = launch { transmit.messages("room").collect { received += it } }
-            withTimeout(5000) { transmit.awaitSubscribed("room") }
-            assertEquals(1, count("subscribe", "room"))
+            val collector = launch { transmit.messages("chats/general").collect { received += it } }
+            withTimeout(5000) { transmit.awaitSubscribed("chats/general") }
+            assertEquals(1, count("subscribe", "chats/general"))
             val records = history()
             assertTrue(records.first().jsonObject["path"]!!.jsonPrimitive.content.endsWith("events"))
             assertTrue(records.all { it.jsonObject["authorization"]!!.jsonPrimitive.content == "Bearer first" })
@@ -45,22 +45,22 @@ class IntegrationTest {
             assertTrue(records.drop(1).all { it.jsonObject["accept"] == JsonNull })
             assertEquals(transmit.uid, records.first().jsonObject["query"]!!.jsonObject["uid"]!!.jsonPrimitive.content)
             assertEquals("first", records.first().jsonObject["query"]!!.jsonObject["token"]!!.jsonPrimitive.content)
-            post("/broadcast", """{"channel":"room","payload":{"seq":1,"text":"hello"}}""")
+            post("/broadcast", """{"channel":"chats/general","payload":{"seq":1,"text":"hello"}}""")
             eventually { received.size == 1 }
             assertEquals("hello", received.single().jsonObject["text"]!!.jsonPrimitive.content)
             post("/control", """{"disconnect":true}""")
-            eventually { count("subscribe", "room") >= 2 }
-            post("/broadcast", """{"channel":"room","payload":{"seq":2}}""")
+            eventually { count("subscribe", "chats/general") >= 2 }
+            post("/broadcast", """{"channel":"chats/general","payload":{"seq":2}}""")
             eventually { received.size == 2 }; assertEquals(2, received.last().jsonObject["seq"]!!.jsonPrimitive.int)
             token = "second"; post("/control", """{"token":"second"}""")
             transmit.refreshAuthentication()
-            eventually { count("subscribe", "room") >= 3 }
+            eventually { count("subscribe", "chats/general") >= 3 }
             assertTrue(history().any { it.jsonObject["authorization"]!!.jsonPrimitive.content == "Bearer second" })
             val denied = async { runCatching { transmit.messages("denied").first() } }
             val error = withTimeout(5000) { denied.await().exceptionOrNull() }
             assertEquals(400, (error as HttpStatusException).statusCode)
             collector.cancelAndJoin()
-            eventually { count("unsubscribe", "room") == 1 }
+            eventually { count("unsubscribe", "chats/general") == 1 }
             assertTrue(history().filter { !it.jsonObject["path"]!!.jsonPrimitive.content.endsWith("events") }
                 .all { it.jsonObject["accept"] == JsonNull })
             // Invalid MIME type and graceful EOF must both cause a fresh connection.
@@ -75,6 +75,54 @@ class IntegrationTest {
             assertEquals(401, (transmit.lastError.value as HttpStatusException).statusCode)
             token = "second"; transmit.refreshAuthentication()
             withTimeout(10_000) { transmit.state.first { it == TransmitClient.State.Connected } }
+            transmit.close(); transmit.awaitClosed()
+            assertEquals(TransmitClient.State.Closed, transmit.state.value)
+        } finally {
+            client?.close(); client?.awaitClosed()
+            http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
+            server.destroy()
+            if (!server.waitFor(5, TimeUnit.SECONDS)) { server.destroyForcibly(); server.waitFor() }
+        }
+    }
+
+    @Test fun `example chat supports confirmed publishing unsubscribe and new subscribers`() = runBlocking {
+        val script = File(System.getProperty("transmit.example.server"))
+        val launcher = ProcessBuilder("node", script.absolutePath).directory(script.parentFile)
+            .redirectError(ProcessBuilder.Redirect.INHERIT)
+        launcher.environment()["PORT"] = "0"
+        val server = launcher.start()
+        val http = OkHttpClient.Builder().readTimeout(5, TimeUnit.SECONDS).build()
+        var client: TransmitClient? = null
+        try {
+            val ready = withContext(Dispatchers.IO) { server.inputStream.bufferedReader().readLine() }
+            assertTrue(ready.startsWith("READY http://127.0.0.1:"), ready)
+            val base = ready.removePrefix("READY ").substringBefore(' ')
+            fun publish(text: String): Pair<Int, JsonObject> {
+                val body = buildJsonObject { put("text", text) }.toString()
+                return http.newCall(Request.Builder().url("$base/messages")
+                    .post(body.toRequestBody("application/json".toMediaType())).build()).execute().use {
+                    it.code to Json.parseToJsonElement(it.body!!.string()).jsonObject
+                }
+            }
+            val transmit = TransmitClient(base)
+            client = transmit
+            val received = mutableListOf<JsonElement>()
+            val listener = launch { transmit.messages("chats/general").collect { received += it } }
+            withTimeout(5000) { transmit.awaitSubscribed("chats/general") }
+            val (status, message) = publish("Hello, everyone!")
+            assertEquals(200, status)
+            assertEquals(setOf("seq", "text", "sender", "sentAt"), message.keys)
+            assertEquals("guest", message["sender"]!!.jsonPrimitive.content)
+            withTimeout(5000) { while (message !in received) delay(10) }
+            assertEquals(400, publish("").first)
+            transmit.unsubscribe("chats/general")
+            withTimeout(5000) { listener.join() }
+            assertEquals(TransmitClient.State.Connected, transmit.state.value)
+            val next = async { transmit.messages("chats/general").first { it.jsonObject["text"]?.jsonPrimitive?.content == "Welcome back" } }
+            withTimeout(5000) { transmit.awaitSubscribed("chats/general") }
+            val followUp = publish("Welcome back").second
+            assertEquals(followUp, withTimeout(5000) { next.await() })
+            assertNotEquals(message["seq"], followUp["seq"])
             transmit.close(); transmit.awaitClosed()
             assertEquals(TransmitClient.State.Closed, transmit.state.value)
         } finally {
