@@ -18,6 +18,7 @@ class TransmitClient internal constructor(
     private val requests: Requests,
     private val transport: Transport,
     dispatcher: CoroutineDispatcher,
+    lifecycleScope: CoroutineScope? = null,
     private val waitForRetry: suspend (Long) -> Unit,
 ) : AutoCloseable {
     constructor(
@@ -25,7 +26,16 @@ class TransmitClient internal constructor(
         tokenQueryParameter: String? = null,
         client: OkHttpClient? = null,
         tokenProvider: suspend () -> String? = { null },
-    ) : this(Requests(baseUrl, tokenQueryParameter, tokenProvider), OkHttpTransport(client), Dispatchers.IO, { delay(it) })
+    ) : this(Requests(baseUrl, tokenQueryParameter, tokenProvider), OkHttpTransport(client), Dispatchers.IO, null, { delay(it) })
+
+    /** Binds cleanup to an owner's cancellation while retaining an independently closeable client. */
+    constructor(
+        baseUrl: String,
+        lifecycleScope: CoroutineScope,
+        tokenQueryParameter: String? = null,
+        client: OkHttpClient? = null,
+        tokenProvider: suspend () -> String? = { null },
+    ) : this(Requests(baseUrl, tokenQueryParameter, tokenProvider), OkHttpTransport(client), Dispatchers.IO, lifecycleScope, { delay(it) })
 
     enum class State { Idle, Connecting, Connected, Reconnecting, AuthenticationFailed, Closed }
 
@@ -35,11 +45,13 @@ class TransmitClient internal constructor(
     val state: StateFlow<State> = mutableState.asStateFlow()
     private val mutableError = MutableStateFlow<Throwable?>(null)
     val lastError: StateFlow<Throwable?> = mutableError.asStateFlow()
-    private val job = SupervisorJob()
+    private val job = SupervisorJob(lifecycleScope?.let { requireNotNull(it.coroutineContext[Job]) { "lifecycleScope must contain a Job" } })
     private val scope = CoroutineScope(job + dispatcher)
     private val commands = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private val channels = mutableMapOf<String, MutableMap<UUID, Channel<JsonElement>>>()
     private val subscribed = mutableSetOf<String>()
+    // Registered before enqueueing so an in-flight POST can settle its waiters immediately.
+    private val subscriptionWaiters = mutableMapOf<String, MutableSet<CompletableDeferred<Unit>>>()
     private var source: EventSource? = null
     private var retry: Job? = null
     private var generation = 0L
@@ -49,6 +61,8 @@ class TransmitClient internal constructor(
         try {
             for (command in commands) command()
         } finally {
+            transition(State.Closed)
+            rejectWaiters(ClientClosedException())
             source?.cancel()
             for (channel in channels.keys.toList()) finish(channel)
             commands.cancel()
@@ -81,6 +95,7 @@ class TransmitClient internal constructor(
                 channels[channel]?.remove(id)
                 if (channels[channel]?.isEmpty() == true) {
                     channels.remove(channel)
+                    finishWaiters(channel, CancellationException("Subscription ended: $channel"))
                     reconcile(channel)
                 }
             }
@@ -89,6 +104,28 @@ class TransmitClient internal constructor(
 
     inline fun <reified T> messages(channel: String, json: Json = Json): Flow<T> =
         messages(channel).map { json.decodeFromJsonElement<T>(it) }
+
+    /** Waits for a successful subscribe POST on this connection; never creates a consumer itself. */
+    suspend fun awaitSubscribed(channel: String) {
+        if (state.value == State.Closed) throw ClientClosedException()
+        val receipt = CompletableDeferred<Unit>()
+        val completion = job.invokeOnCompletion { receipt.completeExceptionally(ClientClosedException()) }
+        synchronized(subscriptionWaiters) { subscriptionWaiters.getOrPut(channel) { mutableSetOf() }.add(receipt) }
+        commands.trySend {
+            if (state.value == State.AuthenticationFailed) receipt.completeExceptionally(requireNotNull(lastError.value))
+            else if (channel in subscribed) receipt.complete(Unit)
+        }
+        try { receipt.await() }
+        finally {
+            completion.dispose()
+            synchronized(subscriptionWaiters) {
+                subscriptionWaiters[channel]?.let {
+                    it.remove(receipt)
+                    if (it.isEmpty()) subscriptionWaiters.remove(channel)
+                }
+            }
+        }
+    }
 
     /** Ends all consumers of a channel. Cancelling one collector only removes that collector. */
     fun unsubscribe(channel: String) { commands.trySend { finish(channel); reconcile(channel) } }
@@ -100,8 +137,9 @@ class TransmitClient internal constructor(
                 authenticationFailures = 0
                 transition(State.Idle)
                 mutableError.value = null
-                start()
-            } else scheduleRetry()
+            }
+            disconnect()
+            start()
         }
     }
 
@@ -127,6 +165,7 @@ class TransmitClient internal constructor(
             source = transport.open(request, object : EventSourceListener() {
                 override fun onOpen(eventSource: EventSource, response: Response) { enqueue(epoch) {
                     authenticationFailures = 0
+                    retryMillis = 1_000
                     mutableError.value = null
                     transition(State.Connected)
                     for (channel in channels.keys.toList()) reconcile(channel)
@@ -134,7 +173,6 @@ class TransmitClient internal constructor(
                 override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) { enqueue(epoch) {
                     val event = parseEnvelope(data)
                     if (event != null) {
-                        retryMillis = 1_000
                         for (sink in channels[event.first].orEmpty().values) sink.trySend(event.second)
                     }
                 } }
@@ -161,6 +199,7 @@ class TransmitClient internal constructor(
             disconnect()
             transition(State.AuthenticationFailed)
             for (channel in channels.keys.toList()) finish(channel, error)
+            rejectWaiters(error)
         } else scheduleRetry()
     }
 
@@ -190,6 +229,7 @@ class TransmitClient internal constructor(
             try {
                 transport.send(requests.create("subscribe", uid, channel))
                 subscribed.add(channel)
+                finishWaiters(channel)
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 finish(channel, error)
@@ -200,7 +240,18 @@ class TransmitClient internal constructor(
         }
     }
 
+    private fun finishWaiters(channel: String, error: Throwable? = null) {
+        val receipts = synchronized(subscriptionWaiters) { subscriptionWaiters.remove(channel) }
+        receipts?.forEach { if (error == null) it.complete(Unit) else it.completeExceptionally(error) }
+    }
+
+    private fun rejectWaiters(error: Throwable) {
+        val pending = synchronized(subscriptionWaiters) { subscriptionWaiters.keys.toList() }
+        for (channel in pending) finishWaiters(channel, error)
+    }
+
     private fun finish(channel: String, error: Throwable? = null) {
         channels.remove(channel)?.values?.forEach { it.close(error) }
+        finishWaiters(channel, error ?: CancellationException("Subscription ended: $channel"))
     }
 }

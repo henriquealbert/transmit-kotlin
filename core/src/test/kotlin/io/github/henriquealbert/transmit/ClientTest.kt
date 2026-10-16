@@ -38,10 +38,10 @@ class ClientTest {
         }
         fun response(code: Int = 200) = Response.Builder().request(sources.last().request()).protocol(Protocol.HTTP_1_1).code(code).message("test").build()
     }
-    class Fixture(val scope: TestScope, token: suspend () -> String? = { null }) {
+    class Fixture(val scope: TestScope, owner: CoroutineScope? = null, token: suspend () -> String? = { null }) {
         val transport = FakeTransport()
         val waits = mutableListOf<Long>()
-        val client = TransmitClient(Requests("https://example.com", null, token), transport, StandardTestDispatcher(scope.testScheduler)) {
+        val client = TransmitClient(Requests("https://example.com", null, token), transport, StandardTestDispatcher(scope.testScheduler), owner) {
             waits += it; delay(it)
         }
         fun start() { client.connect(); scope.runCurrent(); transport.opened(); scope.runCurrent() }
@@ -52,6 +52,7 @@ class ClientTest {
     @Test fun `URL requests preserve prefix and credentials safely`() = runTest {
         val requests = Requests("https://example.com/api/", "access_token") { "a +&b" }
         val stream = requests.create("events", "user")
+        assertEquals("text/event-stream", stream.header("Accept"))
         assertEquals("/api/__transmit/events", stream.url.encodedPath)
         assertEquals("user", stream.url.queryParameter("uid"))
         assertEquals("a +&b", stream.url.queryParameter("access_token"))
@@ -59,6 +60,8 @@ class ClientTest {
         val post = requests.create("subscribe", "user", "a/b")
         val buffer = okio.Buffer(); post.body!!.writeTo(buffer)
         assertEquals(buildJsonObject { put("uid", "user"); put("channel", "a/b") }, Json.parseToJsonElement(buffer.readUtf8()))
+        assertNull(post.header("Accept"))
+        assertNull(requests.create("unsubscribe", "user", "a/b").header("Accept"))
         assertNull(post.url.queryParameter("uid"))
         assertEquals("application/json; charset=utf-8", post.body!!.contentType().toString())
         val anonymous = Requests("http://localhost/api", "token") { null }.create("events", "user")
@@ -124,22 +127,45 @@ class ClientTest {
         f.close()
     }
 
-    @Test fun `reconnect backoff caps restores channels and ignores stale callbacks`() = runTest {
+    @Test fun `failed opens back off to cap and a quiet successful open resets delay`() = runTest {
         val f = Fixture(this)
         backgroundScope.launch { f.client.messages("room").collect() }; runCurrent()
-        f.transport.opened(); runCurrent()
         val originalListener = f.transport.listeners.first(); val originalSource = f.transport.sources.first()
-        repeat(7) { f.transport.end(); runCurrent(); f.retry(); f.transport.opened(); runCurrent() }
+        repeat(7) { f.transport.fail(500); runCurrent(); f.retry() }
         assertEquals(listOf(1000L, 2000L, 4000L, 8000L, 16000L, 30000L, 30000L), f.waits)
-        assertEquals(8, f.transport.posts.size)
-        assertEquals(1, f.transport.sources.map { it.request().url.queryParameter("uid") }.toSet().size)
+        assertTrue(f.transport.posts.isEmpty())
+        f.transport.opened(); runCurrent()
         originalListener.onClosed(originalSource); originalListener.onEvent(originalSource, null, null, "{}"); runCurrent()
         assertEquals(TransmitClient.State.Connected, f.client.state.value)
-        f.transport.event("{\"channel\":\"room\",\"payload\":1}"); runCurrent()
-        f.client.refreshAuthentication(); runCurrent()
+        // No data events or pings are required to reset the delay.
+        f.transport.end(); runCurrent()
         assertEquals(1000L, f.waits.last())
         f.client.connect(); runCurrent(); assertEquals(8, f.transport.sources.size)
-        f.client.unsubscribe("room"); runCurrent()
+        f.retry(); f.transport.opened(); runCurrent()
+        assertEquals(2, f.transport.posts.size)
+        assertEquals(1, f.transport.sources.map { it.request().url.queryParameter("uid") }.toSet().size)
+        f.close()
+    }
+
+    @Test fun `authentication refresh bypasses backoff and immediately restores active channels`() = runTest {
+        var token = "old"
+        val f = Fixture(this) { token }
+        backgroundScope.launch { f.client.messages("room").collect() }; runCurrent()
+        f.transport.opened(); runCurrent()
+        val original = f.transport.sources.single()
+        token = "new"
+        f.client.refreshAuthentication(); runCurrent()
+        assertTrue(original.cancelled)
+        assertEquals(2, f.transport.sources.size)
+        assertTrue(f.waits.isEmpty())
+        assertEquals("Bearer new", f.transport.sources.last().request().header("Authorization"))
+        f.transport.opened(); runCurrent()
+        assertEquals(2, f.transport.posts.size)
+        f.transport.fail(500); runCurrent()
+        f.client.refreshAuthentication(); runCurrent()
+        assertEquals(3, f.transport.sources.size)
+        advanceTimeBy(30_000); runCurrent()
+        assertEquals(3, f.transport.sources.size) // Cancelled retry cannot create another stream.
         f.close()
     }
 
@@ -194,5 +220,97 @@ class ClientTest {
         val f = Fixture(this)
         val consumer = backgroundScope.launch(start = CoroutineStart.UNDISPATCHED) { f.client.messages("pending").collect() }
         f.close(); runCurrent(); assertTrue(consumer.isCompleted)
+    }
+
+    @Test fun `confirmation waits for successful POST and confirms resubscription after reconnect`() = runTest {
+        val f = Fixture(this)
+        val first = async { f.client.awaitSubscribed("room") }; runCurrent()
+        assertTrue(f.transport.sources.isEmpty()) // A wait never creates a hidden consumer.
+        backgroundScope.launch { f.client.messages("room").collect() }; runCurrent()
+        val release = CompletableDeferred<Unit>()
+        f.transport.post = { release.await() }
+        assertFalse(first.isCompleted)
+        f.transport.opened(); runCurrent()
+        val duringPost = async { f.client.awaitSubscribed("room") }; runCurrent()
+        assertFalse(first.isCompleted); assertFalse(duringPost.isCompleted)
+        release.complete(Unit); runCurrent()
+        first.await(); duringPost.await()
+        val confirmed = async { f.client.awaitSubscribed("room") }; runCurrent(); confirmed.await()
+        assertEquals(1, f.transport.posts.size)
+        f.transport.end(); runCurrent()
+        val again = async { f.client.awaitSubscribed("room") }; runCurrent()
+        assertFalse(again.isCompleted)
+        f.retry(); f.transport.opened(); runCurrent(); again.await()
+        assertEquals(2, f.transport.posts.size)
+        f.close()
+    }
+
+    @Test fun `confirmation registered during a failing POST receives that HTTP error`() = runTest {
+        val f = Fixture(this); f.start()
+        val release = CompletableDeferred<Unit>()
+        val expected = HttpStatusException(403)
+        f.transport.post = { release.await(); throw expected }
+        val consumer = async { runCatching { f.client.messages("room").first() } }; runCurrent()
+        val receipt = async { runCatching { f.client.awaitSubscribed("room") } }; runCurrent()
+        assertFalse(receipt.isCompleted)
+        release.complete(Unit); runCurrent()
+        assertSame(expected, receipt.await().exceptionOrNull())
+        assertSame(expected, consumer.await().exceptionOrNull())
+        f.close()
+    }
+
+    @Test fun `cancelled waits do not unsubscribe and channel termination releases confirmations`() = runTest {
+        val f = Fixture(this)
+        val cancelled = async { f.client.awaitSubscribed("room") }
+        val survivor = async { runCatching { f.client.awaitSubscribed("room") } }; runCurrent()
+        cancelled.cancelAndJoin(); runCurrent()
+        val consumer = backgroundScope.launch { f.client.messages("room").collect() }; runCurrent()
+        consumer.cancelAndJoin(); runCurrent()
+        assertIs<CancellationException>(survivor.await().exceptionOrNull())
+        assertTrue(f.transport.posts.isEmpty())
+        val explicit = async { runCatching { f.client.awaitSubscribed("other") } }; runCurrent()
+        f.client.unsubscribe("other"); runCurrent()
+        assertIs<CancellationException>(explicit.await().exceptionOrNull())
+        val only = async { f.client.awaitSubscribed("cancel-only") }; runCurrent(); only.cancelAndJoin(); runCurrent()
+        val closing = async { runCatching { f.client.awaitSubscribed("closing") } }; runCurrent()
+        f.close(); runCurrent()
+        assertIs<ClientClosedException>(closing.await().exceptionOrNull())
+        assertFailsWith<ClientClosedException> { f.client.awaitSubscribed("closed") }
+    }
+
+    @Test fun `authentication exhaustion releases confirmations even without a consumer`() = runTest {
+        val f = Fixture(this)
+        val pending = async { runCatching { f.client.awaitSubscribed("future") } }; runCurrent()
+        f.client.connect(); runCurrent()
+        repeat(3) { f.transport.fail(401); runCurrent(); if (it < 2) f.retry() }
+        assertEquals(401, (pending.await().exceptionOrNull() as HttpStatusException).statusCode)
+        val afterFailure = async { runCatching { f.client.awaitSubscribed("future") } }; runCurrent()
+        assertSame(f.client.lastError.value, afterFailure.await().exceptionOrNull())
+        f.close()
+    }
+
+    @Test fun `lifecycle cancellation closes the client without explicit close and preserves parent ownership`() = runTest {
+        for (phase in listOf("connected", "retry", "post")) {
+            val owner = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+            val f = Fixture(this, owner)
+            val consumer = backgroundScope.launch { f.client.messages("room").collect() }; runCurrent()
+            if (phase == "post") f.transport.post = { awaitCancellation() }
+            f.transport.opened(); runCurrent()
+            if (phase == "retry") { f.transport.end(); runCurrent() }
+            val receipt = async { runCatching { f.client.awaitSubscribed("pending") } }; runCurrent()
+            owner.cancel(); runCurrent(); f.client.awaitClosed()
+            assertEquals(TransmitClient.State.Closed, f.client.state.value)
+            assertTrue(f.transport.closed); assertTrue(f.transport.sources.single().cancelled)
+            assertTrue(consumer.isCompleted)
+            assertIs<ClientClosedException>(receipt.await().exceptionOrNull())
+            assertTrue(owner.coroutineContext[Job]!!.children.none())
+            advanceTimeBy(30_000); runCurrent(); assertEquals(1, f.transport.sources.size)
+        }
+        val owner = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val f = Fixture(this, owner); f.close()
+        assertTrue(owner.isActive)
+        owner.cancel()
+        val alreadyCancelled = Fixture(this, owner); runCurrent(); alreadyCancelled.client.awaitClosed()
+        assertEquals(TransmitClient.State.Closed, alreadyCancelled.client.state.value)
     }
 }

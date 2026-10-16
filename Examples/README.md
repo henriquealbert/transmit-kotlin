@@ -21,4 +21,4 @@ The emulator reaches the host at `10.0.2.2:3333`. Tap **Send a message** to exer
 
 Stop the backend with Ctrl-C, observe `Reconnecting`, then start it again. Messages should resume automatically with a new server instance id and an incremented reconnect count. For a physical device, replace the app's base URL with a reachable development host address and bind the development backend appropriately. Cleartext HTTP is enabled only in this example; use HTTPS for production applications.
 
-The Activity owns the Transmit client and closes it in `onDestroy`; recreation creates a new connection. No credentials or environment-specific SDK paths are stored in the repository.
+The Activity binds the Transmit client to its `lifecycleScope` and also closes it in `onDestroy`; cancelling that scope guarantees cleanup even if the explicit close is forgotten, and recreation creates a new connection. No credentials or environment-specific SDK paths are stored in the repository.

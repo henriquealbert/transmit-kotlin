@@ -36,10 +36,13 @@ class IntegrationTest {
             client = transmit
             val received = mutableListOf<JsonElement>()
             val collector = launch { transmit.messages("room").collect { received += it } }
-            eventually { count("subscribe", "room") == 1 }
+            withTimeout(5000) { transmit.awaitSubscribed("room") }
+            assertEquals(1, count("subscribe", "room"))
             val records = history()
             assertTrue(records.first().jsonObject["path"]!!.jsonPrimitive.content.endsWith("events"))
             assertTrue(records.all { it.jsonObject["authorization"]!!.jsonPrimitive.content == "Bearer first" })
+            assertEquals("text/event-stream", records.first().jsonObject["accept"]!!.jsonPrimitive.content)
+            assertTrue(records.drop(1).all { it.jsonObject["accept"] == JsonNull })
             assertEquals(transmit.uid, records.first().jsonObject["query"]!!.jsonObject["uid"]!!.jsonPrimitive.content)
             assertEquals("first", records.first().jsonObject["query"]!!.jsonObject["token"]!!.jsonPrimitive.content)
             post("/broadcast", """{"channel":"room","payload":{"seq":1,"text":"hello"}}""")
@@ -58,6 +61,8 @@ class IntegrationTest {
             assertEquals(400, (error as HttpStatusException).statusCode)
             collector.cancelAndJoin()
             eventually { count("unsubscribe", "room") == 1 }
+            assertTrue(history().filter { !it.jsonObject["path"]!!.jsonPrimitive.content.endsWith("events") }
+                .all { it.jsonObject["accept"] == JsonNull })
             // Invalid MIME type and graceful EOF must both cause a fresh connection.
             val eventsBefore = count("events")
             post("/control", """{"invalidContent":true,"disconnect":true}""")

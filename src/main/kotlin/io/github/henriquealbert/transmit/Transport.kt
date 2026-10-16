@@ -30,7 +30,8 @@ internal class Requests(baseUrl: String, private val queryKey: String?, private 
         val url = base.newBuilder().addPathSegments("__transmit/$action")
         if (channel == null) url.addQueryParameter("uid", uid)
         if (queryKey != null && credential != null) url.addQueryParameter(queryKey, credential)
-        return Request.Builder().url(url.build()).header("Accept", "text/event-stream").apply {
+        return Request.Builder().url(url.build()).apply {
+            if (channel == null) header("Accept", "text/event-stream")
             if (credential != null) header("Authorization", "Bearer $credential")
             if (channel != null) post(buildJsonObject {
                 put("uid", uid)

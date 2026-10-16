@@ -30,7 +30,7 @@ data class Message(val id: String, val text: String, val source: String, val ser
 
 class MainActivity : ComponentActivity() {
     private val baseUrl = "http://10.0.2.2:3333"
-    private val client = TransmitClient(baseUrl)
+    private val client = TransmitClient(baseUrl, lifecycleScope = lifecycleScope)
     private val http = OkHttpClient()
     private val messages = mutableStateListOf<Message>()
     private var reconnects by mutableIntStateOf(0)

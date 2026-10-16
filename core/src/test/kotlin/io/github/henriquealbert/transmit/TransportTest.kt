@@ -35,18 +35,33 @@ class TransportTest {
         client.dispatcher.executorService.shutdown(); client.connectionPool.evictAll()
     }
 
-    @Test fun `public defaults open anonymous SSE and reconnect after EOF`() = runBlocking {
-        val server = MockWebServer(); server.start()
-        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(": ping\n\n"))
-        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(": ping\n\n"))
-        val client = TransmitClient(server.url("/").toString())
-        try {
-            client.connect()
-            val first = server.takeRequest(5, TimeUnit.SECONDS)!!
-            val second = server.takeRequest(5, TimeUnit.SECONDS)!!
-            assertEquals(first.path, second.path)
-            assertNull(first.getHeader("Authorization"))
-        } finally { client.close(); client.awaitClosed(); server.shutdown() }
+    @Test fun `public defaults and lifecycle constructor open anonymous SSE and reconnect after EOF`() = runBlocking {
+        for (bound in listOf(false, true)) {
+            val server = MockWebServer(); server.start()
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(": ping\n\n"))
+            server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(": ping\n\n"))
+            val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val client = if (bound) TransmitClient(server.url("/").toString(), lifecycleScope = owner)
+                else TransmitClient(server.url("/").toString())
+            try {
+                client.connect()
+                val first = server.takeRequest(5, TimeUnit.SECONDS)!!
+                val second = server.takeRequest(5, TimeUnit.SECONDS)!!
+                assertEquals(first.path, second.path)
+                assertNull(first.getHeader("Authorization"))
+            } finally {
+                if (bound) owner.cancel() else client.close()
+                client.awaitClosed(); owner.cancel(); server.shutdown()
+            }
+            assertEquals(TransmitClient.State.Closed, client.state.value)
+        }
+    }
+
+    @Test fun `lifecycle binding requires a cancellable owner`() {
+        val owner = object : CoroutineScope {
+            override val coroutineContext = kotlin.coroutines.EmptyCoroutineContext
+        }
+        assertFailsWith<IllegalArgumentException> { TransmitClient("http://localhost", lifecycleScope = owner) }
     }
 
     @Test fun `public defaults and immediate close settle`() = runBlocking {

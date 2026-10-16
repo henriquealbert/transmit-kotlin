@@ -1,6 +1,6 @@
 # transmit-kotlin
 
-An independent Kotlin / Android client for [AdonisJS Transmit](https://docs.adonisjs.com/guides/digging-deeper/transmit), ported from [transmit-swift 0.1.0](https://github.com/henriquealbert/transmit-swift). Android **24+**, Kotlin coroutines, cold `Flow` consumers, OkHttp SSE, and kotlinx.serialization. MIT licensed.
+An independent Kotlin / Android client for [AdonisJS Transmit](https://docs.adonisjs.com/guides/digging-deeper/transmit), ported from [transmit-swift](https://github.com/henriquealbert/transmit-swift). Android **24+**, Kotlin coroutines, cold `Flow` consumers, OkHttp SSE, and kotlinx.serialization. MIT licensed.
 
 ## Install with JitPack
 
@@ -20,7 +20,7 @@ Then add the Android library to your app:
 
 ```kotlin
 dependencies {
-    implementation("com.github.henriquealbert:transmit-kotlin:0.1.0")
+    implementation("com.github.henriquealbert:transmit-kotlin:0.1.1")
 }
 ```
 
@@ -36,7 +36,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class Notification(val title: String, val unreadCount: Int)
 
-val client = TransmitClient("https://api.example.com")
+val client = TransmitClient("https://api.example.com", lifecycleScope = ownerScope)
 val listener = ownerScope.launch {
     try {
         client.messages<Notification>("notifications").collect { message ->
@@ -55,6 +55,8 @@ client.close() // At logout / owner disposal; permanent and idempotent.
 ```
 
 The flow is cold: collecting opens the connection and registers a consumer. Multiple collectors on the same channel share one server subscription. Cancelling a collector or using `first()` / `take()` removes it automatically. `unsubscribe(channel)` ends all current collectors on that channel. `messages(channel)` without a type returns `Flow<JsonElement>` and supports objects, arrays, scalars, and JSON `null`.
+
+`suspend client.awaitSubscribed(channel)` waits for the server's successful subscribe response on the current connection. Start a collector first (or concurrently); waiting alone never subscribes or creates a hidden consumer. It returns immediately if that channel is already confirmed, and waits for a new confirmation after reconnect. Pending waits receive subscription errors, terminal authentication errors, cancellation when the last consumer leaves or the channel is unsubscribed, and a closed-client error on shutdown. Cancelling a wait does not cancel its consumers. Use an application timeout if a collector might never start; a confirmation does not prevent a later network disconnect or provide replay guarantees.
 
 Malformed envelopes and `:` ping comments are ignored. A payload decoding failure ends only that collector; a failed subscribe request ends the channel's collectors with the HTTP error. By default, each collector has an unbounded queue. Keep processing lightweight or collect into an application-owned bounded queue when backpressure matters.
 
@@ -83,11 +85,11 @@ Configure authentication and native-client CSRF rules on all three server endpoi
 - `connect()` schedules opening without a channel. Wait for `state` to become `Connected` when readiness matters; this acknowledges the SSE connection, not any channel subscription.
 - One UUID `uid` is generated per client and retained across retries and authentication refreshes. It is not persisted across new client instances or app launches.
 - SSE uses `GET {base}/__transmit/events?uid=…`. Subscribe and unsubscribe use POST JSON `{ "uid": "…", "channel": "…" }`, only while the stream is open.
-- Reconnect delays are **1, 2, 4, 8, 16, 30 seconds**, capped at 30. A valid event resets the delay. Reopening restores every channel that still has collectors. Explicit credential refresh also uses this retry delay.
+- Reconnect delays are **1, 2, 4, 8, 16, 30 seconds**, capped at 30. A successful stream open resets the delay, including quiet streams with no data events. Reopening restores every channel that still has collectors. Explicit credential refresh cancels the current stream or retry delay and reopens immediately with fresh credentials, without waiting for backoff.
 - Transmit does not replay messages lost while disconnected. Backends implementing replay or redelivery may produce **duplicate events after resubscribe**. Include a stable `seq` and deduplicate within its channel scope; never reuse that sequence across backend restarts in the same scope.
 - Base URLs may have a path prefix but must not contain credentials, query parameters, or fragments. Use HTTPS in production.
 - `close()` cancels the owned coroutine scope, SSE call, retry delay, and pending POSTs, and ends consumers. Closing the SSE connection lets Adonis remove that client's server subscriptions. It does not wait for cleanup POSTs while offline. `awaitClosed()` waits for cancellation to settle; create a new client to start again.
-- A supplied `OkHttpClient` stays under the caller's ownership. The default client and its connection pool/executor are released on close. Explicitly close the Transmit client; garbage collection is not a lifecycle mechanism.
+- A supplied `OkHttpClient` stays under the caller's ownership. The default client and its connection pool/executor are released on close. For leak protection, pass an owner scope such as an Activity's `lifecycleScope` or a ViewModel's `viewModelScope`: `TransmitClient(baseUrl, lifecycleScope = ownerScope)`. Cancellation of that scope closes the owned child scope, connection, pending requests, consumers, and confirmation waits even if `close()` was forgotten; closing the client never cancels the owner scope. This works on Android 24+ and preserves the original constructor. Without lifecycle binding, explicit `close()` remains required; garbage collection is not a cleanup guarantee.
 
 ## Read timeout
 
@@ -112,7 +114,7 @@ npm ci --prefix integration-server --no-audit --no-fund
 ./gradlew assembleRelease :core:test :core:integrationTest :core:koverVerify :core:koverXmlReport :example:assembleDebug
 ```
 
-The JVM `:core` module compiles the **same source files** as the Android AAR. Unit tests cover requests, parsing, sharing, decoding errors, backoff, auth exhaustion, cancellation, and HTTP failures. Integration tests launch a real loopback AdonisJS 6 server with `@adonisjs/transmit` 2.0.2 and validate actual routing, auth, subscriptions, broadcasts, socket loss, malformed MIME type, EOF, and token rotation. Integration retry waits are shortened; unit tests separately verify the production delay sequence.
+The JVM `:core` module compiles the **same source files** as the Android AAR. Unit tests cover requests, parsing, sharing, decoding errors, backoff reset on opening, immediate credential refresh, subscribe acknowledgement and cancellation, lifecycle-owned cleanup, auth exhaustion, and HTTP failures. Integration tests launch a real loopback AdonisJS 6 server with `@adonisjs/transmit` 2.0.2 and validate actual routing, auth, subscriptions, broadcasts, socket loss, malformed MIME type, EOF, and token rotation. Integration retry waits are shortened; unit tests separately verify the production delay sequence.
 
 Kover enforces **100% library line coverage** across all production Kotlin sources, with no source exclusions. A missing line fails `:core:koverVerify`; the gate aggregates unit and integration tests. Branch/instruction counts are also available in `core/build/reports/kover/report.xml`. Example UI and the JavaScript fixtures are outside the library coverage metric. CI builds the AAR and Compose example, runs both suites, verifies coverage, and uploads test/coverage reports and the example APK.
 

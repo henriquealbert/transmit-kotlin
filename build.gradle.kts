@@ -9,7 +9,7 @@ plugins {
     `maven-publish`
 }
 group = "com.github.henriquealbert"
-version = "0.1.0"
+version = "0.1.1"
 android {
     namespace = "io.github.henriquealbert.transmit"
     compileSdk = 35
