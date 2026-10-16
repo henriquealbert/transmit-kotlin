@@ -1,0 +1,41 @@
+name: CI
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: integration-server/package-lock.json
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android platform
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Install real Adonis integration server
+        run: npm ci --prefix integration-server --no-audit --no-fund
+      - name: Build library, test, enforce coverage, and build example
+        run: ./gradlew assembleRelease :core:test :core:integrationTest :core:koverVerify :core:koverXmlReport :example:assembleDebug
+      - name: Verify publication
+        run: ./gradlew publishReleasePublicationToMavenLocal
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation
+          path: |
+            core/build/reports/
+            core/build/test-results/
+            Examples/Android/build/outputs/apk/debug/*.apk
