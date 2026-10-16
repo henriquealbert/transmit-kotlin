@@ -112,7 +112,7 @@ class TransmitClient internal constructor(
     }
 
     /** Waits for cancelled requests, consumers, and the owned controller to settle. */
-    suspend fun awaitClosed() { worker.join() }
+    suspend fun awaitClosed() { worker.join(); job.join() }
 
     private fun transition(next: State) {
         mutableState.update { current -> if (current == State.Closed) current else next }
