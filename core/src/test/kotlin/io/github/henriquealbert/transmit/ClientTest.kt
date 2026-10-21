@@ -284,6 +284,27 @@ class ClientTest {
         assertFailsWith<ClientClosedException> { f.client.awaitSubscribed("closed") }
     }
 
+    @Test fun `replacement after old collectors finish keeps its subscription confirmation`() = runTest {
+        for (explicit in listOf(true, false)) {
+            val f = Fixture(this)
+            val immediate = UnconfinedTestDispatcher(testScheduler)
+            val previous = backgroundScope.launch(immediate) { f.client.messages("room").collect() }
+            runCurrent(); f.transport.opened(); runCurrent()
+            lateinit var replacement: Job
+            lateinit var confirmation: Deferred<Result<Unit>>
+            previous.invokeOnCompletion {
+                replacement = backgroundScope.launch(immediate) { f.client.messages("room").collect() }
+                confirmation = backgroundScope.async(immediate) { runCatching { f.client.awaitSubscribed("room") } }
+            }
+            if (explicit) f.client.unsubscribe("room") else previous.cancel()
+            runCurrent()
+            assertEquals(Unit, confirmation.await().getOrThrow())
+            assertTrue(replacement.isActive)
+            assertEquals(listOf("subscribe", "unsubscribe", "subscribe"), f.transport.posts.map { it.url.pathSegments.last() })
+            f.close()
+        }
+    }
+
     @Test fun `authentication exhaustion releases confirmations even without a consumer`() = runTest {
         val f = Fixture(this)
         val pending = async { runCatching { f.client.awaitSubscribed("future") } }; runCurrent()

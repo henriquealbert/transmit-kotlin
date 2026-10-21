@@ -93,11 +93,12 @@ class TransmitClient internal constructor(
         finally {
             completion.dispose()
             sink.cancel()
+            val endingWaiters = synchronized(subscriptionWaiters) { subscriptionWaiters[channel]?.toList().orEmpty() }
             commands.trySend {
                 channels[channel]?.remove(id)
                 if (channels[channel]?.isEmpty() == true) {
                     channels.remove(channel)
-                    finishWaiters(channel, CancellationException("Subscription ended: $channel"))
+                    for (receipt in endingWaiters) receipt.completeExceptionally(CancellationException("Subscription ended: $channel"))
                     reconcile(channel)
                 }
             }
@@ -256,7 +257,9 @@ class TransmitClient internal constructor(
     }
 
     private fun finish(channel: String, error: Throwable? = null) {
-        channels.remove(channel)?.values?.forEach { it.close(error) }
+        val consumers = channels.remove(channel)?.values
+        // Ending a collector can immediately start a replacement and register a new waiter.
         finishWaiters(channel, error ?: CancellationException("Subscription ended: $channel"))
+        consumers?.forEach { it.close(error) }
     }
 }
