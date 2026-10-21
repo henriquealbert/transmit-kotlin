@@ -35,7 +35,13 @@ class IntegrationTest {
             val transmit = TransmitClient(Requests(base, "token") { token }, OkHttpTransport(null), Dispatchers.IO) { delay(50) }
             client = transmit
             val received = mutableListOf<JsonElement>()
-            val collector = launch { transmit.messages("chats/general").collect { received += it } }
+            val collector = launch {
+                try { transmit.messages("chats/general").collect { received += it } }
+                catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                    throw AssertionError("Collector failed; server history: ${history()}", error)
+                }
+            }
             withTimeout(5000) { transmit.awaitSubscribed("chats/general") }
             assertEquals(1, count("subscribe", "chats/general"))
             val records = history()
@@ -52,9 +58,17 @@ class IntegrationTest {
             eventually { count("subscribe", "chats/general") >= 2 }
             post("/broadcast", """{"channel":"chats/general","payload":{"seq":2}}""")
             eventually { received.size == 2 }; assertEquals(2, received.last().jsonObject["seq"]!!.jsonPrimitive.int)
-            token = "second"; post("/control", """{"token":"second"}""")
+            // Adversarial ordering: register the replacement before the old stream's
+            // close handler deletes its UID mapping in Transmit's storage.
+            token = "second"; post("/control", """{"token":"second","holdNextClose":true}""")
             transmit.refreshAuthentication()
-            eventually { count("subscribe", "chats/general") >= 3 }
+            withTimeout(5000) { transmit.awaitSubscribed("chats/general") }
+            eventually { get("/health").jsonObject["heldCloses"]!!.jsonPrimitive.int == 1 }
+            post("/control", """{"releaseCloses":true}""")
+            val afterRefresh = async { transmit.messages("after-refresh").first() }
+            withTimeout(5000) { transmit.awaitSubscribed("after-refresh") }
+            post("/broadcast", """{"channel":"after-refresh","payload":"alive"}""")
+            assertEquals(JsonPrimitive("alive"), withTimeout(5000) { afterRefresh.await() })
             assertTrue(history().any { it.jsonObject["authorization"]!!.jsonPrimitive.content == "Bearer second" })
             val denied = async { runCatching { transmit.messages("denied").first() } }
             val error = withTimeout(5000) { denied.await().exceptionOrNull() }

@@ -143,7 +143,7 @@ class ClientTest {
         f.client.connect(); runCurrent(); assertEquals(8, f.transport.sources.size)
         f.retry(); f.transport.opened(); runCurrent()
         assertEquals(2, f.transport.posts.size)
-        assertEquals(1, f.transport.sources.map { it.request().url.queryParameter("uid") }.toSet().size)
+        assertEquals(f.transport.sources.size, f.transport.sources.map { it.request().url.queryParameter("uid") }.toSet().size)
         f.close()
     }
 
@@ -153,14 +153,20 @@ class ClientTest {
         backgroundScope.launch { f.client.messages("room").collect() }; runCurrent()
         f.transport.opened(); runCurrent()
         val original = f.transport.sources.single()
+        val originalUid = original.request().url.queryParameter("uid")
         token = "new"
         f.client.refreshAuthentication(); runCurrent()
         assertTrue(original.cancelled)
         assertEquals(2, f.transport.sources.size)
+        val refreshedUid = f.transport.sources.last().request().url.queryParameter("uid")
+        assertNotEquals(originalUid, refreshedUid)
+        assertEquals(refreshedUid, f.client.uid)
         assertTrue(f.waits.isEmpty())
         assertEquals("Bearer new", f.transport.sources.last().request().header("Authorization"))
         f.transport.opened(); runCurrent()
         assertEquals(2, f.transport.posts.size)
+        val body = okio.Buffer(); f.transport.posts.last().body!!.writeTo(body)
+        assertEquals(refreshedUid, Json.parseToJsonElement(body.readUtf8()).jsonObject["uid"]!!.jsonPrimitive.content)
         f.transport.fail(500); runCurrent()
         f.client.refreshAuthentication(); runCurrent()
         assertEquals(3, f.transport.sources.size)
@@ -276,6 +282,27 @@ class ClientTest {
         f.close(); runCurrent()
         assertIs<ClientClosedException>(closing.await().exceptionOrNull())
         assertFailsWith<ClientClosedException> { f.client.awaitSubscribed("closed") }
+    }
+
+    @Test fun `replacement after old collectors finish keeps its subscription confirmation`() = runTest {
+        for (explicit in listOf(true, false)) {
+            val f = Fixture(this)
+            val immediate = UnconfinedTestDispatcher(testScheduler)
+            val previous = backgroundScope.launch(immediate) { f.client.messages("room").collect() }
+            runCurrent(); f.transport.opened(); runCurrent()
+            lateinit var replacement: Job
+            lateinit var confirmation: Deferred<Result<Unit>>
+            previous.invokeOnCompletion {
+                replacement = backgroundScope.launch(immediate) { f.client.messages("room").collect() }
+                confirmation = backgroundScope.async(immediate) { runCatching { f.client.awaitSubscribed("room") } }
+            }
+            if (explicit) f.client.unsubscribe("room") else previous.cancel()
+            runCurrent()
+            assertEquals(Unit, confirmation.await().getOrThrow())
+            assertTrue(replacement.isActive)
+            assertEquals(listOf("subscribe", "unsubscribe", "subscribe"), f.transport.posts.map { it.url.pathSegments.last() })
+            f.close()
+        }
     }
 
     @Test fun `authentication exhaustion releases confirmations even without a consumer`() = runTest {

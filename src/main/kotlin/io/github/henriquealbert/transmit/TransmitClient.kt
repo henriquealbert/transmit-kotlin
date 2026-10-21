@@ -39,8 +39,10 @@ class TransmitClient internal constructor(
 
     enum class State { Idle, Connecting, Connected, Reconnecting, AuthenticationFailed, Closed }
 
-    /** Stable for this instance across connection loss and token refresh. */
-    val uid: String = UUID.randomUUID().toString()
+    /** Identifies the current SSE stream; replaced on reconnect or authentication refresh. */
+    @Volatile
+    var uid: String = UUID.randomUUID().toString()
+        private set
     private val mutableState = MutableStateFlow(State.Idle)
     val state: StateFlow<State> = mutableState.asStateFlow()
     private val mutableError = MutableStateFlow<Throwable?>(null)
@@ -91,11 +93,12 @@ class TransmitClient internal constructor(
         finally {
             completion.dispose()
             sink.cancel()
+            val endingWaiters = synchronized(subscriptionWaiters) { subscriptionWaiters[channel]?.toList().orEmpty() }
             commands.trySend {
                 channels[channel]?.remove(id)
                 if (channels[channel]?.isEmpty() == true) {
                     channels.remove(channel)
-                    finishWaiters(channel, CancellationException("Subscription ended: $channel"))
+                    for (receipt in endingWaiters) receipt.completeExceptionally(CancellationException("Subscription ended: $channel"))
                     reconcile(channel)
                 }
             }
@@ -207,6 +210,9 @@ class TransmitClient internal constructor(
         generation++
         source?.cancel()
         source = null
+        // Old server-side close handlers can run after the replacement stream opens.
+        // Reusing their UID lets that cleanup delete the new stream's subscription mapping.
+        uid = UUID.randomUUID().toString()
         retry?.cancel()
         retry = null
         subscribed.clear()
@@ -251,7 +257,9 @@ class TransmitClient internal constructor(
     }
 
     private fun finish(channel: String, error: Throwable? = null) {
-        channels.remove(channel)?.values?.forEach { it.close(error) }
+        val consumers = channels.remove(channel)?.values
+        // Ending a collector can immediately start a replacement and register a new waiter.
         finishWaiters(channel, error ?: CancellationException("Subscription ended: $channel"))
+        consumers?.forEach { it.close(error) }
     }
 }

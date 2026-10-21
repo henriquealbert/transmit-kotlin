@@ -83,7 +83,7 @@ Configure authentication and native-client CSRF rules on all three server endpoi
 ## Connection behavior
 
 - `connect()` schedules opening without a channel. Wait for `state` to become `Connected` when readiness matters; this acknowledges the SSE connection, not any channel subscription.
-- One UUID `uid` is generated per client and retained across retries and authentication refreshes. It is not persisted across new client instances or app launches.
+- Each SSE stream has its own UUID `uid`. `client.uid` exposes the current stream's UID and changes when reconnect or authentication refresh replaces that stream. Subscribe and unsubscribe requests use that stream's UID. Do not use it as a persistent client or user identity. Versions through 0.1.3 reused the UID across streams; late cleanup of an older stream could then erase the replacement's subscription mapping, causing HTTP 400 with Transmit 3 or an unregistered subscription with Transmit 2.
 - SSE uses `GET {base}/__transmit/events?uid=…`. Subscribe and unsubscribe use POST JSON `{ "uid": "…", "channel": "…" }`, only while the stream is open.
 - Reconnect delays are **1, 2, 4, 8, 16, 30 seconds**, capped at 30. A successful stream open resets the delay, including quiet streams with no data events. Reopening restores every channel that still has collectors. Explicit credential refresh cancels the current stream or retry delay and reopens immediately with fresh credentials, without waiting for backoff.
 - Transmit does not replay messages lost while disconnected. Backends implementing replay or redelivery may produce **duplicate events after resubscribe**. Include a stable `seq` and deduplicate within its channel scope; never reuse that sequence across backend restarts in the same scope.
@@ -206,7 +206,7 @@ CI runs the full validation suite against both tested combinations:
 | 7.6.0 | 3.0.2 | Default, installed from `integration-server/package-lock.json` |
 | 6.21.0 | 2.0.2 | Compatibility matrix entry; also used by the example backend |
 
-Transmit 3.0.2 declares the AdonisJS peer dependency `^7.0.0-next`, which accepts stable v7. Both combinations pass with the same Kotlin client; no protocol changes are required. The shared test server configures the separate encryption service required by v7 and retains v6's `app.appKey`. To run the v6 fixture locally after the default installation:
+Transmit 3.0.2 declares the AdonisJS peer dependency `^7.0.0-next`, which accepts stable v7. Both combinations use the same endpoints and JSON envelopes. Transmit 3 rejects subscriptions when the stream UID is missing from server storage; the client uses a fresh UID on reconnect and credential refresh so an older stream's delayed cleanup cannot remove the replacement's mapping. The integration suite forces this ordering and verifies a new subscription and broadcast after the old cleanup runs. The shared test server configures the separate encryption service required by v7 and retains v6's `app.appKey`. To run the v6 fixture locally after the default installation:
 
 ```sh
 npm install --prefix integration-server --no-save --package-lock=false --no-audit --no-fund @adonisjs/core@6.21.0 @adonisjs/transmit@2.0.2
