@@ -6,15 +6,22 @@ import { Application } from '@adonisjs/core/app'
 import { setApp } from '@adonisjs/core/services/app'
 import { defineConfig as httpConfig } from '@adonisjs/core/http'
 import { defineConfig as bodyConfig } from '@adonisjs/core/bodyparser'
+import * as encryption from '@adonisjs/core/encryption'
 
 const app = new Application(new URL('./', import.meta.url), { environment: 'web' })
+const appKey = 'integration-only-key-do-not-use-in-production'
 setApp(app)
 app.rcContents({ providers: [
   () => import('@adonisjs/core/providers/app_provider'),
   () => import('@adonisjs/transmit/transmit_provider'),
 ] })
 app.useConfig({
-  app: { appKey: 'integration-only-key-do-not-use-in-production', http: httpConfig({}) },
+  app: { appKey, http: httpConfig({}) },
+  // AdonisJS 7 requires a separate encryption config; v6 uses app.appKey.
+  encryption: encryption.defineConfig?.({
+    default: 'app',
+    list: { app: encryption.drivers.aes256gcm({ id: 'app', keys: [appKey] }) },
+  }),
   logger: { default: 'app', loggers: { app: { enabled: false, name: 'integration', level: 'silent' } } },
   bodyparser: bodyConfig({}),
   transmit: { pingInterval: '100ms', transport: null },

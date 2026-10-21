@@ -3,6 +3,7 @@
 **/build/
 local.properties
 node_modules/
+/integration-server/.adonisjs/
 .idea/
 *.iml
 .DS_Store

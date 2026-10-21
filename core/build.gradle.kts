@@ -28,6 +28,10 @@ val integrationTest by tasks.registering(Test::class) {
     include("**/IntegrationTest*")
     useJUnit()
     inputs.files(rootProject.file("integration-server/server.mjs"), rootProject.file("Examples/Backend/server.mjs"))
+    inputs.files(
+        rootProject.file("integration-server/node_modules/@adonisjs/core/package.json"),
+        rootProject.file("integration-server/node_modules/@adonisjs/transmit/package.json"),
+    )
     systemProperty("transmit.server", rootProject.file("integration-server/server.mjs").absolutePath)
     systemProperty("transmit.example.server", rootProject.file("Examples/Backend/server.mjs").absolutePath)
     shouldRunAfter(tasks.test)
