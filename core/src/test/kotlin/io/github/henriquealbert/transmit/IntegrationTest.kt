@@ -13,7 +13,7 @@ import org.junit.Test
 
 /** Launches actual Adonis providers, router, body parser, and Transmit controllers. */
 class IntegrationTest {
-    @Test fun `real Adonis SSE auth subscriptions broadcasts reconnect and cleanup`() = runBlocking {
+    @Test(timeout = 60_000) fun `real Adonis SSE auth subscriptions broadcasts reconnect and cleanup`() = runBlocking {
         val script = File(System.getProperty("transmit.server"))
         val server = ProcessBuilder("node", script.absolutePath).directory(script.parentFile).redirectError(ProcessBuilder.Redirect.INHERIT).start()
         val http = OkHttpClient.Builder().readTimeout(5, TimeUnit.SECONDS).build()
@@ -78,14 +78,16 @@ class IntegrationTest {
             transmit.close(); transmit.awaitClosed()
             assertEquals(TransmitClient.State.Closed, transmit.state.value)
         } finally {
-            client?.close(); client?.awaitClosed()
-            http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
-            server.destroy()
-            if (!server.waitFor(5, TimeUnit.SECONDS)) { server.destroyForcibly(); server.waitFor() }
+            withContext(NonCancellable) {
+                client?.close(); client?.awaitClosed()
+                http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
+                server.destroy()
+                if (!server.waitFor(5, TimeUnit.SECONDS)) { server.destroyForcibly(); server.waitFor() }
+            }
         }
     }
 
-    @Test fun `example chat supports confirmed publishing unsubscribe and new subscribers`() = runBlocking {
+    @Test(timeout = 60_000) fun `example chat supports confirmed publishing unsubscribe and new subscribers`() = runBlocking {
         val script = File(System.getProperty("transmit.example.server"))
         val launcher = ProcessBuilder("node", script.absolutePath).directory(script.parentFile)
             .redirectError(ProcessBuilder.Redirect.INHERIT)
@@ -126,10 +128,12 @@ class IntegrationTest {
             transmit.close(); transmit.awaitClosed()
             assertEquals(TransmitClient.State.Closed, transmit.state.value)
         } finally {
-            client?.close(); client?.awaitClosed()
-            http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
-            server.destroy()
-            if (!server.waitFor(5, TimeUnit.SECONDS)) { server.destroyForcibly(); server.waitFor() }
+            withContext(NonCancellable) {
+                client?.close(); client?.awaitClosed()
+                http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
+                server.destroy()
+                if (!server.waitFor(5, TimeUnit.SECONDS)) { server.destroyForcibly(); server.waitFor() }
+            }
         }
     }
 }

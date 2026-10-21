@@ -27,6 +27,7 @@ val integrationTest by tasks.registering(Test::class) {
     classpath = sourceSets.test.get().runtimeClasspath
     include("**/IntegrationTest*")
     useJUnit()
+    testLogging { exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
     inputs.files(rootProject.file("integration-server/server.mjs"), rootProject.file("Examples/Backend/server.mjs"))
     inputs.files(
         rootProject.file("integration-server/node_modules/@adonisjs/core/package.json"),
