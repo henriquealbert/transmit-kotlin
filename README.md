@@ -197,7 +197,23 @@ npm ci --prefix Examples/Backend --no-audit --no-fund
 ./gradlew assembleRelease :core:test :core:integrationTest :core:koverVerify :core:koverXmlReport :example:assembleDebug
 ```
 
-The JVM `:core` module compiles the **same source files** as the Android AAR. Unit tests cover requests, parsing, sharing, decoding errors, backoff reset on opening, immediate credential refresh, subscribe acknowledgement and cancellation, lifecycle-owned cleanup, auth exhaustion, and HTTP failures. Integration tests launch a real loopback AdonisJS 6 server with `@adonisjs/transmit` 2.0.2 and validate actual routing, auth, subscriptions, broadcasts, socket loss, malformed MIME type, EOF, and token rotation. A second integration test launches the example backend and verifies confirmed chat publishing, unsubscribe, and a fresh subscription. Integration retry waits are shortened; unit tests separately verify the production delay sequence.
+The JVM `:core` module compiles the **same source files** as the Android AAR. Unit tests cover requests, parsing, sharing, decoding errors, backoff reset on opening, immediate credential refresh, subscribe acknowledgement and cancellation, lifecycle-owned cleanup, auth exhaustion, and HTTP failures. Integration tests launch a real loopback AdonisJS server and validate actual routing, auth, subscriptions, broadcasts, socket loss, malformed MIME type, EOF, and token rotation. A second integration test launches the example backend and verifies confirmed chat publishing, unsubscribe, and a fresh subscription. Integration retry waits are shortened; unit tests separately verify the production delay sequence.
+
+CI runs the full validation suite against both tested combinations:
+
+| AdonisJS | `@adonisjs/transmit` | Integration fixture |
+| --- | --- | --- |
+| 7.6.0 | 3.0.2 | Default, installed from `integration-server/package-lock.json` |
+| 6.21.0 | 2.0.2 | Compatibility matrix entry; also used by the example backend |
+
+Transmit 3.0.2 declares the AdonisJS peer dependency `^7.0.0-next`, which accepts stable v7. Both combinations pass with the same Kotlin client; no protocol changes are required. The shared test server configures the separate encryption service required by v7 and retains v6's `app.appKey`. To run the v6 fixture locally after the default installation:
+
+```sh
+npm install --prefix integration-server --no-save --package-lock=false --no-audit --no-fund @adonisjs/core@6.21.0 @adonisjs/transmit@2.0.2
+./gradlew :core:integrationTest :core:koverVerify :core:koverXmlReport
+```
+
+The v6 override leaves the committed v7 manifest and lockfile intact; its transitive dependencies resolve at install time. Run `npm ci --prefix integration-server --no-audit --no-fund` to restore the locked v7 fixture. Gradle tracks the installed server versions so switching between fixtures reruns the integration tests.
 
 Kover enforces **100% library line coverage** across all production Kotlin sources, with no source exclusions. A missing line fails `:core:koverVerify`; the gate aggregates unit and integration tests. Branch/instruction counts are also available in `core/build/reports/kover/report.xml`. Example UI and the JavaScript fixtures are outside the library coverage metric. CI builds the AAR and Compose example, runs both suites, verifies coverage, and uploads test/coverage reports and the example APK.
 

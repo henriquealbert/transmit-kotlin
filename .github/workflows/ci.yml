@@ -8,8 +8,17 @@ permissions:
   contents: read
 jobs:
   build:
+    name: AdonisJS ${{ matrix.adonis }} / Transmit ${{ matrix.transmit }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - adonis: '7.6.0'
+            transmit: '3.0.2'
+          - adonis: '6.21.0'
+            transmit: '2.0.2'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -34,6 +43,22 @@ jobs:
         run: |
           npm ci --prefix integration-server --no-audit --no-fund
           npm ci --prefix Examples/Backend --no-audit --no-fund
+      - name: Select AdonisJS 6 compatibility fixture
+        if: matrix.adonis == '6.21.0'
+        run: npm install --prefix integration-server --no-save --package-lock=false --no-audit --no-fund @adonisjs/core@${{ matrix.adonis }} @adonisjs/transmit@${{ matrix.transmit }}
+      - name: Verify tested server versions
+        env:
+          ADONIS_VERSION: ${{ matrix.adonis }}
+          TRANSMIT_VERSION: ${{ matrix.transmit }}
+        run: |
+          node --input-type=commonjs <<'NODE'
+          const assert = require('node:assert/strict')
+          const core = require('./integration-server/node_modules/@adonisjs/core/package.json').version
+          const transmit = require('./integration-server/node_modules/@adonisjs/transmit/package.json').version
+          assert.equal(core, process.env.ADONIS_VERSION)
+          assert.equal(transmit, process.env.TRANSMIT_VERSION)
+          console.log(`Testing AdonisJS ${core} / Transmit ${transmit}`)
+          NODE
       - name: Build library, test, enforce coverage, and build example
         run: ./gradlew assembleRelease :core:test :core:integrationTest :core:koverVerify :core:koverXmlReport :example:assembleDebug
       - name: Verify publication
@@ -41,7 +66,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: validation
+          name: validation-adonis-${{ matrix.adonis }}
           path: |
             core/build/reports/
             core/build/test-results/
