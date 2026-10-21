@@ -20,7 +20,7 @@ Then add the Android library to your app:
 
 ```kotlin
 dependencies {
-    implementation("com.github.henriquealbert:transmit-kotlin:0.1.3")
+    implementation("com.github.henriquealbert:transmit-kotlin:0.1.4")
 }
 ```
 
