@@ -32,6 +32,8 @@ const server = await app.container.make('server')
 const router = await app.container.make('router')
 const transmit = await app.container.make('transmit')
 const history = []
+const heldCloses = []
+let holdNextClose = false
 const sockets = new Set()
 const eventSockets = new Set()
 let requiredToken = 'first'
@@ -41,13 +43,27 @@ let endNext = false
 server.use([() => import('@adonisjs/core/bodyparser_middleware')])
 router.use([() => Promise.resolve({ default: class {
   async handle(ctx, next) {
+    let record
     if (ctx.request.url().startsWith('/__transmit/')) {
-      history.push({ path: ctx.request.url(), authorization: ctx.request.header('authorization') ?? null,
-        query: ctx.request.qs(), body: ctx.request.body(), accept: ctx.request.header('accept') ?? null, sessionHeader: ctx.request.header('x-transmit-session') ?? null })
+      record = { path: ctx.request.url(), authorization: ctx.request.header('authorization') ?? null,
+        query: ctx.request.qs(), body: ctx.request.body(), accept: ctx.request.header('accept') ?? null, sessionHeader: ctx.request.header('x-transmit-session') ?? null }
+      history.push(record)
       if (ctx.request.header('authorization') !== `Bearer ${requiredToken}`) return ctx.response.unauthorized()
       if (rejectNext) { rejectNext = false; return ctx.response.serviceUnavailable() }
       if (invalidContent) { invalidContent = false; return ctx.response.send('not SSE') }
       if (ctx.request.url().endsWith('/events')) {
+        const response = ctx.response.response
+        const emit = response.emit
+        // Force an old stream's cleanup to run after its replacement is registered.
+        // Only the close notification is held; the actual socket still closes normally.
+        response.emit = function (event, ...args) {
+          if (event === 'close' && holdNextClose) {
+            holdNextClose = false
+            heldCloses.push(() => emit.call(this, event, ...args))
+            return true
+          }
+          return emit.call(this, event, ...args)
+        }
         const socket = ctx.request.request.socket
         eventSockets.add(socket)
         socket.once('close', () => eventSockets.delete(socket))
@@ -59,12 +75,16 @@ router.use([() => Promise.resolve({ default: class {
         return ctx.response.send(': goodbye\n\n')
       }
     }
-    return next()
+    const result = await next()
+    if (record) {
+      record.status = ctx.response.getStatus()
+    }
+    return result
   }
 } })])
 transmit.registerRoutes()
 transmit.authorize('denied', () => false)
-router.get('/health', () => ({ ok: true }))
+router.get('/health', () => ({ ok: true, heldCloses: heldCloses.length }))
 router.get('/history', () => history)
 router.post('/broadcast', ({ request }) => {
   transmit.broadcast(request.input('channel'), request.input('payload'))
@@ -75,6 +95,10 @@ router.post('/control', ({ request }) => {
   rejectNext = request.input('rejectNext', false)
   invalidContent = request.input('invalidContent', false)
   endNext = request.input('endNext', false)
+  if (request.input('holdNextClose', false)) holdNextClose = true
+  if (request.input('releaseCloses', false)) {
+    for (const release of heldCloses.splice(0)) release()
+  }
   if (request.input('disconnect', false)) {
     for (const socket of eventSockets) socket.destroy()
   }
@@ -89,6 +113,7 @@ await app.start(async () => {
     console.log(`http://127.0.0.1:${http.address().port}`)
   })
   process.on('SIGTERM', async () => {
+    for (const release of heldCloses.splice(0)) release()
     for (const socket of sockets) socket.destroy()
     http.close()
     await app.terminate()

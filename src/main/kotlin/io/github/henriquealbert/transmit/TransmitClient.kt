@@ -39,8 +39,10 @@ class TransmitClient internal constructor(
 
     enum class State { Idle, Connecting, Connected, Reconnecting, AuthenticationFailed, Closed }
 
-    /** Stable for this instance across connection loss and token refresh. */
-    val uid: String = UUID.randomUUID().toString()
+    /** Identifies the current SSE stream; replaced on reconnect or authentication refresh. */
+    @Volatile
+    var uid: String = UUID.randomUUID().toString()
+        private set
     private val mutableState = MutableStateFlow(State.Idle)
     val state: StateFlow<State> = mutableState.asStateFlow()
     private val mutableError = MutableStateFlow<Throwable?>(null)
@@ -207,6 +209,9 @@ class TransmitClient internal constructor(
         generation++
         source?.cancel()
         source = null
+        // Old server-side close handlers can run after the replacement stream opens.
+        // Reusing their UID lets that cleanup delete the new stream's subscription mapping.
+        uid = UUID.randomUUID().toString()
         retry?.cancel()
         retry = null
         subscribed.clear()

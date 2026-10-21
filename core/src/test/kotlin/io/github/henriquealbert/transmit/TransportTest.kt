@@ -47,7 +47,8 @@ class TransportTest {
                 client.connect()
                 val first = server.takeRequest(5, TimeUnit.SECONDS)!!
                 val second = server.takeRequest(5, TimeUnit.SECONDS)!!
-                assertEquals(first.path, second.path)
+                assertEquals(first.requestUrl!!.encodedPath, second.requestUrl!!.encodedPath)
+                assertNotEquals(first.requestUrl!!.queryParameter("uid"), second.requestUrl!!.queryParameter("uid"))
                 assertNull(first.getHeader("Authorization"))
             } finally {
                 if (bound) owner.cancel() else client.close()
