@@ -49,7 +49,12 @@ internal interface Transport {
 
 internal class OkHttpTransport(client: OkHttpClient?) : Transport {
     private val owned = client == null
-    internal val client = client ?: OkHttpClient.Builder().readTimeout(90, TimeUnit.SECONDS).build()
+    internal val client = when {
+        client == null -> OkHttpClient.Builder().readTimeout(90, TimeUnit.SECONDS)
+            .cookieJar(InMemoryCookieJar()).build()
+        client.cookieJar === CookieJar.NO_COOKIES -> client.newBuilder().cookieJar(InMemoryCookieJar()).build()
+        else -> client
+    }
     override fun open(request: Request, listener: EventSourceListener): EventSource =
         EventSources.createFactory(client).newEventSource(request, listener)
 
@@ -72,6 +77,26 @@ internal class OkHttpTransport(client: OkHttpClient?) : Transport {
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
         }
+    }
+}
+
+/** Session-only storage shared by this transport's stream and subscription requests. */
+internal class InMemoryCookieJar : CookieJar {
+    private val cookies = linkedMapOf<Triple<String, String, String>, Cookie>()
+
+    @Synchronized override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        val now = System.currentTimeMillis()
+        this.cookies.values.removeAll { it.expiresAt <= now }
+        for (cookie in cookies) {
+            val key = Triple(cookie.name, cookie.domain, cookie.path)
+            if (cookie.expiresAt <= now) this.cookies.remove(key)
+            else this.cookies[key] = cookie
+        }
+    }
+
+    @Synchronized override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        cookies.values.removeAll { it.expiresAt <= System.currentTimeMillis() }
+        return cookies.values.filter { it.matches(url) }.sortedByDescending { it.path.length }
     }
 }
 

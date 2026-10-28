@@ -20,7 +20,7 @@ Then add the Android library to your app:
 
 ```kotlin
 dependencies {
-    implementation("com.github.henriquealbert:transmit-kotlin:0.1.4")
+    implementation("com.github.henriquealbert:transmit-kotlin:0.1.5")
 }
 ```
 
@@ -84,6 +84,7 @@ Configure authentication and native-client CSRF rules on all three server endpoi
 
 - `connect()` schedules opening without a channel. Wait for `state` to become `Connected` when readiness matters; this acknowledges the SSE connection, not any channel subscription.
 - Each SSE stream has its own UUID `uid`. `client.uid` exposes the current stream's UID and changes when reconnect or authentication refresh replaces that stream. Subscribe and unsubscribe requests use that stream's UID. Do not use it as a persistent client or user identity. Versions through 0.1.3 reused the UID across streams; late cleanup of an older stream could then erase the replacement's subscription mapping, causing HTTP 400 with Transmit 3 or an unregistered subscription with Transmit 2.
+- Sticky-cookie load balancers work out of the box: stream and subscription requests share a thread-safe, in-memory cookie jar per client, with no persistence. A supplied OkHttp client with `NO_COOKIES` gets a derived client with this jar; a custom jar is used unchanged.
 - SSE uses `GET {base}/__transmit/events?uid=…`. Subscribe and unsubscribe use POST JSON `{ "uid": "…", "channel": "…" }`, only while the stream is open.
 - Reconnect delays are **1, 2, 4, 8, 16, 30 seconds**, capped at 30. A successful stream open resets the delay, including quiet streams with no data events. Reopening restores every channel that still has collectors. Explicit credential refresh cancels the current stream or retry delay and reopens immediately with fresh credentials, without waiting for backoff.
 - Transmit does not replay messages lost while disconnected. Backends implementing replay or redelivery may produce **duplicate events after resubscribe**. Include a stable `seq` and deduplicate within its channel scope; never reuse that sequence across backend restarts in the same scope.
